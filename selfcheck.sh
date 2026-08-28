@@ -2,7 +2,8 @@
 # =============================================================================
 # selfcheck.sh — is a deployment exposed to log4j2 #4255?  (self-contained)
 #
-#   --scan DIR            STATIC: flag any log4j-core jar in the affected range
+#   --scan DIR            STATIC: flag any jar containing FilteredObjectInputStream
+#                         (log4j-core 2.8.2–2.10 or log4j-api 2.11.0+, incl. shaded)
 #                         2.8.0–2.26.1. Necessary, not sufficient — you also need
 #                         an exposed FOIS serialized-LogEvent receiver.
 #   --dns                 DYNAMIC, fully local: spin the lab receiver + a DNS sink
@@ -18,40 +19,40 @@ IMG=log4j4255
 G=$'\e[32m'; R=$'\e[31m'; A=$'\e[33m'; D=$'\e[2m'; O=$'\e[0m'
 die(){ echo "${R}[!] $*${O}"; exit 1; }
 
-AFFECTED_LOW="2.8.0"; AFFECTED_HIGH="2.26.1"
-in_range(){ local v="$1"
-  [ "$(printf '%s\n%s\n' "$AFFECTED_LOW" "$v" | sort -V | head -1)" = "$AFFECTED_LOW" ] &&
-  [ "$(printf '%s\n%s\n' "$v" "$AFFECTED_HIGH" | sort -V | head -1)" = "$v" ]
-}
+# FOIS shipped 2.8.2–2.26.1 and is gone in 3.x, so the presence of the class is
+# the real signal — not a jar name or a version guess. Detect the class in ANY
+# jar. Its package moved with it: org.apache.logging.log4j.core.util.* in
+# log4j-core (2.8.2–2.10), then org.apache.logging.log4j.util.* in log4j-api
+# (2.11.0+) — so match the class file regardless of package or jar name (this
+# also catches shaded/renamed fat jars that a log4j-core-*.jar glob would miss).
+AFFECTED_RANGE="2.8.2–2.26.1"
 
 scan(){
   local dir="${1:-.}"
   command -v unzip >/dev/null || die "need 'unzip' for the static scan"
-  echo "${A}[*] scanning $dir for log4j-core jars ...${O}"
+  echo "${A}[*] scanning $dir for the FilteredObjectInputStream class ($AFFECTED_RANGE) ...${O}"
   local found=0 vuln=0
   while IFS= read -r jar; do
-    found=1
+    # only jars that ACTUALLY contain FOIS — not by filename (a 161-byte stub
+    # named log4j-core-2.20.0.jar must not be flagged; a shaded jar must be)
+    unzip -l "$jar" 2>/dev/null | grep -q 'FilteredObjectInputStream\.class' || continue
+    found=1; vuln=1
     local ver
-    ver="$(unzip -p "$jar" 'META-INF/maven/org.apache.logging.log4j/log4j-core/pom.properties' 2>/dev/null \
-           | sed -n 's/^version=//p' | head -1)"
-    [ -z "$ver" ] && ver="$(basename "$jar" | sed -n 's/.*log4j-core-\([0-9][0-9.]*\)\.jar/\1/p')"
-    [ -z "$ver" ] && ver="unknown"
-    if [ "$ver" != "unknown" ] && in_range "$ver"; then
-      vuln=1; echo "  ${R}AFFECTED${O}  $jar  (log4j-core $ver, in $AFFECTED_LOW–$AFFECTED_HIGH)"
-    else
-      echo "  ${G}ok${O}        $jar  (log4j-core $ver)"
-    fi
-  done < <(find "$dir" -name 'log4j-core*.jar' 2>/dev/null)
-  [ "$found" = 0 ] && { echo "  ${D}no log4j-core jar found under $dir${O}"; return; }
+    ver="$(unzip -p "$jar" 'META-INF/maven/org.apache.logging.log4j/log4j-api/pom.properties'  2>/dev/null | sed -n 's/^version=//p' | head -1)"
+    [ -z "$ver" ] && ver="$(unzip -p "$jar" 'META-INF/maven/org.apache.logging.log4j/log4j-core/pom.properties' 2>/dev/null | sed -n 's/^version=//p' | head -1)"
+    [ -z "$ver" ] && ver="version unknown"
+    echo "  ${R}AFFECTED${O}  $jar  (FilteredObjectInputStream present, $ver)"
+  done < <(find "$dir" -name '*.jar' 2>/dev/null)
   echo
   if [ "$vuln" = 1 ]; then
-    echo "${A}[!] An affected log4j-core is present — necessary, not sufficient.${O}"
+    echo "${A}[!] The FilteredObjectInputStream class is present — necessary, not sufficient.${O}"
     echo "    Exploitable only if the app ALSO exposes a serialized-LogEvent receiver"
     echo "    (SocketServer / ObjectInputStreamLogEventBridge reading via FOIS)."
     echo "    Confirm with the DYNAMIC check (--dns / --oob)."
-  else
-    echo "${G}[+] No affected log4j-core jar found.${O}"
+    return 3   # non-zero so --scan can gate CI
   fi
+  echo "${G}[+] No jar under $dir contains FilteredObjectInputStream.${O}"
+  return 0
 }
 
 dns_sink(){ # start a local UDP:53 DNS logger container, echo its IP
