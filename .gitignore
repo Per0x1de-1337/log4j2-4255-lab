@@ -1,0 +1,14 @@
+# third-party, user-supplied (see README)
+ysoserial.jar
+*.jar
+
+# build artifacts
+*.class
+.classes/
+.jars/
+
+# marker / scratch files from runs
+PWNED_*
+bomb.bin
+*.bin
+/tmp/l4j_dnslog.py
